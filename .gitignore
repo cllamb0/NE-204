@@ -129,3 +129,10 @@ dmypy.json
 .pyre/
 
 .DS_Store
+
+# Data and plots directories
+Lab-1/Data/
+Lab-1/Plots/
+
+Lab-2/Data/
+Lab-2/Plots/
