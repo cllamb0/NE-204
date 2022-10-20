@@ -35,6 +35,10 @@ To properly calibrate a gamma ray spectrum from a high purity germanium detector
 
 _TrapHeights2, TrapHeightsFitOpt, and FinalTrapHeights are all in the google drive._
 
+[Height CSV files](https://drive.google.com/drive/folders/1Q4N2P4-Xm8F-QY0Zpz0JT3QF_czpScuI?usp=sharing) 
+
+[Raw Data](https://drive.google.com/drive/folders/13Ma5xbS09C1gT9NPtYzwDSG4IaYQvCe4?usp=sharing)
+
 ## Quick Procedure
 
 ### Step 1: 
