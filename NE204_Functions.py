@@ -132,12 +132,14 @@ def gauss(x, H, A, x0, sigma):
     # Gaussian signal shape
     return H + A * np.exp(-(x - x0) ** 2 / (2 * sigma ** 2))
 
-def gauss_fit(x, y):
+def gauss_fit(x, y, var=False):
     # Fits gaussian and returns fit parameters
     mean = sum(x * y) / sum(y)
     sigma = np.sqrt(sum(y * (x - mean) ** 2) / sum(y))
     popt, pcov = curve_fit(gauss, x, y, p0=[min(y), max(y), mean, sigma])
     perr = np.sqrt(np.diag(pcov))
+    if var:
+        return popt, pcov
     return popt
 
 def calibrate_energy(ch, a1, a2, a3, a4, a5, b):
@@ -154,7 +156,7 @@ def calibrate_pulses(data, peak=500, gap=2500, tau=15000, max_energy=3000, retur
     if not calibrated:
         max_energy = max_trapezoid_height
     energies, rinds = [], []
-    for i, pulse in enumerate(tqdm(data, desc="Creating spectra")):
+    for i, pulse in enumerate(tqdm(data, desc="Creating spectra", leave=False)):
         fs = savgol_filter(pulse, 51, 0)
         try:
             trap = s(fs, determine_rise(fs), tau, peak, gap)
@@ -220,7 +222,7 @@ def quick_resolution(energies, e_min, e_max):
     plt.semilogy()
     plt.show()
 
-
+    return gauss_fit(bins_out[start:end], counts[start:end], var=True)
 """
     Functions and Variables created during Lab 2
 """
