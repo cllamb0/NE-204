@@ -17,6 +17,18 @@ import time
 import os
 from datetime import date
 
+import sklearn.cluster as sklclu
+from sklearn.cluster import KMeans
+from kneed import KneeLocator
+
+import matplotlib.animation as animation
+from matplotlib.animation import FFMpegWriter
+
+plt.rcParams['figure.dpi'] = 300
+
+source_colors = {'Co57': 'red', 'Co60': 'orange', 'Cs137': 'gold',
+                 'Eu152': 'green', 'Th228': 'blue', 'Background': 'purple'}
+
 try:
     os.mkdir('Plots')
     print('Created Plots directory')
@@ -28,7 +40,7 @@ except:
 """
     Functions and Variables created during Lab 1
 """
-def import_data(datafile):
+def import_data(datafile, adc_max=16383):
     # Imports data into a numpy array based on whatever raw data is present in the h5 file
     f = h5py.File(datafile)
 
@@ -36,8 +48,8 @@ def import_data(datafile):
     f.close()
 
     sat_i = []
-    for i in range(len(data)):
-        if data[i][1300] == 16383:
+    for i in tqdm(range(len(data)), desc='Checking for Saturation', leave=False):
+        if np.max(data[i]) == adc_max:
             sat_i.append(i)
 
     return data, sat_i
@@ -139,7 +151,7 @@ def gauss_fit(x, y, var=False):
     popt, pcov = curve_fit(gauss, x, y, p0=[min(y), max(y), mean, sigma])
     perr = np.sqrt(np.diag(pcov))
     if var:
-        return popt, pcov
+        return popt, perr
     return popt
 
 def calibrate_energy(ch, a1, a2, a3, a4, a5, b):
@@ -150,27 +162,53 @@ def calibrate_energy(ch, a1, a2, a3, a4, a5, b):
 calib_consts = np.load('../Lab-1/calibration_values_final.npy')
 
 def calibrate_pulses(data, peak=500, gap=2500, tau=15000, max_energy=3000, return_inds=False,
-                    calibrated=True, max_trapezoid_height=493154, save_file=None):
+                    calibrated=True, max_trapezoid_height=1000, save_file=None, svw=51, use_CFD=False, shift=500,
+                    samp_size=500, new_trapezoid=True, use_calib=None, multipulse_rejection=False, verbose=False):
     # Takes in raw_data array and creates the trapezoid, calculates the height
     # and then calibrates the energy corresponding to that trapezoid height
     if not calibrated:
         max_energy = max_trapezoid_height
     energies, rinds = [], []
+    if multipulse_rejection:
+        pileup_inds = possible_pileup(data, peak, gap, tau)
+    else:
+        pileup_inds = []
     for i, pulse in enumerate(tqdm(data, desc="Creating spectra", leave=False)):
-        fs = savgol_filter(pulse, 51, 0)
+        fs = savgol_filter(pulse, svw, 0)
         try:
-            trap = s(fs, determine_rise(fs), tau, peak, gap)
+            if i in pileup_inds:
+                continue
+
+            if new_trapezoid:
+                if use_calib is None:
+                    use_calib = calib_consts_new
+                if i == 0:
+                    if verbose:
+                        print('Using new trapezoid filtering technique')
+                trap = trapezoid_filter(fs, peak, gap, tau, samp_size=samp_size)
+            else:
+                if use_calib is None:
+                    use_calib = calib_consts
+                if i == 0:
+                    if verbose:
+                        print('Using old trapezoid filtering technique')
+
+                if use_CFD:
+                    trap = s(fs, CFD(fs, 0.1, shift=shift, samp_size=samp_size), tau, peak, gap)
+                else:
+                    trap = s(fs, determine_rise(fs), tau, peak, gap)
             #trap_height_fit = trapezoid_height(trap, peak, gap)
             if calibrated:
-                pulse_energy = calibrate_energy(max(trap), *calib_consts)
+                pulse_height = calibrate_energy(np.max(trap), *use_calib)
             else:
-                pulse_energy = max(trap)
+                pulse_height = np.max(trap)
         except:
-            print('Index {} failed to fit or create trapezoid'.format(i))
+            if verbose:
+                print('Index {} failed to fit or create trapezoid'.format(i))
             continue
 
-        if pulse_energy < max_energy:
-            energies.append(pulse_energy)
+        if pulse_height < max_energy:
+            energies.append(pulse_height)
 
             if return_inds:
                 rinds.append(i)
@@ -200,19 +238,20 @@ def calc_activity(source):
 
     return source[3]*np.exp(-(np.log(2)/source[2])*delt)*3.7e10
 
-def quick_resolution(energies, e_min, e_max):
+def quick_resolution(energies, e_min, e_max, adc_bit=11):
     # Goes through a quick gaussian fitting based on a calibrated energies array and min/max energies
     plt.figure(dpi=300)
-    counts, bins_out, patches = plt.hist(energies, bins=2**11, alpha=0.5, label='Max')
+    counts, bins_out, patches = plt.hist(energies, bins=2**adc_bit, alpha=0.5)
 
     win_min, win_max = e_min, e_max
 
     start = np.argmin(np.abs(bins_out - win_min))
     end = np.argmin(np.abs(bins_out - win_max))
 
-    gauss_result = gauss_fit(bins_out[start:end], counts[start:end])
+    gauss_result, gauss_unc = gauss_fit(bins_out[start:end], counts[start:end], var=True)
 
-    print('Peak energy: {}'.format(gauss_result[2]))
+    print('Peak energy: {} +- {}'.format(gauss_result[2], gauss_unc[2]))
+    print('Peak sigma: {} +- {}'.format(gauss_result[3], gauss_unc[3]))
     print("Calculated resolution: {}%".format(round(np.abs(((gauss_result[3]*2.35482)/gauss_result[2])*100),3)))
 
     plt.plot(gauss(np.arange(3000), *gauss_result), alpha=0.5)
@@ -222,13 +261,16 @@ def quick_resolution(energies, e_min, e_max):
     plt.semilogy()
     plt.show()
 
-    return gauss_fit(bins_out[start:end], counts[start:end], var=True)
+    return gauss_result, gauss_unc
 """
     Functions and Variables created during Lab 2
 """
 
-def import_lab1_energies(source_name, indexes=False):
-    filepath_enes = '../Lab-1/Data/Trapezoid_Heights/'
+def import_lab1_energies(source_name, indexes=False, new=True):
+    if new:
+        filepath_enes = '../Lab-1/Data/Trapezoid_Heights/New/'
+    else:
+        filepath_enes = '../Lab-1/Data/Trapezoid_Heights/Old/'
     files_enes = ['Co57-Cal.npy', 'Co60-Cal.npy', 'Cs137-Cal.npy', 'Eu152-Cal.npy', 'Th228-Cal.npy', 'Background-Cal.npy']
     files_enes = [filepath_enes+f for f in files_enes]
 
@@ -246,12 +288,117 @@ def import_lab1_energies(source_name, indexes=False):
 def reset_zero(signal, samp_size=500):
     return signal - np.mean(signal[:samp_size])
 
-def CFD(signal, frac, shift=500, pf=False, samp_size=500):
+def CFD(signal, frac, shift=500, pf=False, samp_size=500, save_name=None):
     signal = reset_zero(signal, samp_size=samp_size)
+    signal = signal[:np.argmax(signal)+shift]# For cropping before decay
+
     mod_signal = (-frac*signal)[shift:]
     CFD_result = signal[:len(signal)-shift]+mod_signal
 
     if pf:
-        return mod_signal, CFD_result, np.argwhere(np.where(CFD_result>0, 0, CFD_result)!=0)[-1][0]
+        plt.plot(4e-3*np.arange(len(signal)), signal, label='Original Signal')
+        plt.plot(4e-3*np.arange(len(mod_signal)), mod_signal, label='Modified Signal')
+        plt.plot(4e-3*np.arange(len(CFD_result)), CFD_result, label='CFD Signal')
+        plt.axvline(4e-3*np.argwhere(np.where(CFD_result>0, 0, CFD_result)!=0)[-1][0], label='CFD {} Result'.format(frac), color='red')
+        plt.xlabel('Time [us]')
+        plt.ylabel('Pulse Height [arb]')
+        plt.legend(loc='lower right')
+        if save_name is not None:
+            plt.savefig('Plots/{}.png'.format(save_name), dpi=300, facecolor='white', bbox_inches='tight')
+        #return mod_signal, CFD_result, np.argwhere(np.where(CFD_result>0, 0, CFD_result)!=0)[-1][0]
     else:
         return np.argwhere(np.where(CFD_result>0, 0, CFD_result)!=0)[-1][0]
+
+def tangent_line(x, y, point, width=10):
+    ind = x.index(point)
+    mb = (y[ind+1]-y[ind])/(x[ind+1]-x[ind])
+    ma = (y[ind]-y[ind-1])/(x[ind]-x[ind-1])
+    m = (mb+ma)/2
+
+    xt = np.linspace(point-width/2, point+width/2, 1000)
+    yt = m*(xt - x[ind]) + y[ind]
+
+    return xt, yt
+
+def cluster_data(data, n_clust, buff=50, quality=True):
+    kmeans = sklclu.KMeans(init='random', n_clusters=n_clust, n_init=10, max_iter=2000, random_state=69) #int(time.time()))
+    kmeans.fit(data)
+
+    clusts = kmeans.labels_
+
+    rise_times = []
+    for pp in range(len(data)):
+        signal = savgol_filter(data[pp], 31, 0)
+        rise_times.append([CFD(signal, 0.1, samp_size=50), CFD(signal, 0.9, samp_size=50)])
+
+    # Attempting FOM creation
+    if quality:
+        w_inertia = []
+        for i in range(len(clusts)):
+            weight = np.zeros(len(data[i]))
+            weight[rise_times[i][0]:rise_times[i][1]+buff] = np.ones((rise_times[i][1]+buff)-(rise_times[i][0]))
+            weight = weight/sum(weight)
+            #val = weight*np.abs((data[i]-kmeans.cluster_centers_[clusts[i]])/kmeans.cluster_centers_[clusts[i]])
+            #sse = np.cumsum(np.square(data[i]-kmeans.cluster_centers_[kmeans.labels_[i]])/kmeans.cluster_centers_[kmeans.labels_[i]])[-1]
+            val = np.cumsum(weight*np.square(data[i]-kmeans.cluster_centers_[clusts[i]]))[-1]
+            w_inertia.append(val)
+
+        return np.sum(np.array(w_inertia)), kmeans.inertia_
+    else:
+        return kmeans
+
+### The return of the trapezoids and my dissatifaction for the original trapezoid filtering that I made
+
+def MWD(pulse, M, tau, samp_size=500):
+    # Width of window M must be greater than the rise time of the pulse
+    signal = delay_signal(reset_zero(pulse, samp_size=samp_size), M)
+    sum_sig = np.cumsum(signal)
+    return signal[M:]-signal[:-M]+(1/tau)*(sum_sig[M:]-sum_sig[:-M])
+
+def MA(pulse, L, samp_size=500):
+    signal = delay_signal(reset_zero(pulse, samp_size=samp_size), L)
+    sum_sig = np.cumsum(signal)
+    return (1/L)*(sum_sig[L:]-sum_sig[:-L])
+
+def trapezoid_filter(pulse, peaking_time=500, gap_time=2500, tau=15000, samp_size=500):
+    return MA(MWD(pulse, peaking_time+gap_time, tau, samp_size=samp_size), peaking_time, samp_size=samp_size)
+
+def plot_spectra(energies, names=None, calibrated=True, adc_bit=10):
+    """
+    If energies is an array of pulse heights or energies, this will plot a single spectra
+    If energies is a list of array of phs or energies then this will plot multiple spectra given "names"
+    """
+    if type(energies[0]) == np.ndarray:
+        bins_ = np.linspace(0, np.max(energies[0]), 2**adc_bit+1)
+        if names is None:
+            names = ['Spectra {}'.format(i) for i in np.arange(len(energies))+1]
+        for e in range(len(energies)):
+            plt.hist(energies[e], bins=bins_, label=names[e], alpha=0.5)
+    else:
+        bins_ = np.linspace(0, np.max(energies), 2**adc_bit+1)
+        if names is None:
+            names = 'Spectra'
+        plt.hist(energies, bins=bins_, label=names)
+
+    plt.semilogy()
+    plt.legend()
+    if calibrated:
+        plt.xlabel('Energy [keV]')
+    else:
+        plt.xlabel('Trapezoid Height')
+    plt.ylabel('Counts')
+
+# Importing in pre-determined calibration constants from improved trapezoidal filtering
+calib_consts_new = np.load('../Lab-2/calibration_values_new.npy')
+
+def possible_pileup(pulses, peak, gap, tau, fudge=1.05, fudge_max=3000):
+    # Determine indices where there is possible pileup or multiple gamma rays
+    pileup_inds = []
+    for p, pulse in enumerate(tqdm(pulses, leave=False, desc='Detecting Pileup')):
+        theo_area = np.max(reset_zero(pulse))*(peak+gap)
+        trap = trapezoid_filter(pulse, peak, gap, tau)
+
+        if (np.sum(trap) > fudge*theo_area) or (np.argmax(pulse) > fudge_max):
+            pileup_inds.append(p)
+
+    return pileup_inds
