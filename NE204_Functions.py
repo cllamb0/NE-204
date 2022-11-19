@@ -391,9 +391,17 @@ def plot_spectra(energies, names=None, calibrated=True, adc_bit=10):
 # Importing in pre-determined calibration constants from improved trapezoidal filtering
 calib_consts_new = np.load('../Lab-2/calibration_values_new.npy')
 
-def possible_pileup(pulses, peak, gap, tau, fudge=1.05, fudge_max=3000):
+def possible_pileup(pulses, peak, gap, tau, fudge=1.05, fudge_max=3000, binary=False):
     # Determine indices where there is possible pileup or multiple gamma rays
     pileup_inds = []
+    if binary:
+        theo_area = np.max(reset_zero(pulses))*(peak+gap)
+        trap = trapezoid_filter(pulses, peak, gap, tau)
+
+        if (np.sum(trap) > fudge*theo_area) or (np.argmax(pulses) > fudge_max):
+            return True
+        return False
+
     for p, pulse in enumerate(tqdm(pulses, leave=False, desc='Detecting Pileup')):
         theo_area = np.max(reset_zero(pulse))*(peak+gap)
         trap = trapezoid_filter(pulse, peak, gap, tau)
@@ -402,3 +410,72 @@ def possible_pileup(pulses, peak, gap, tau, fudge=1.05, fudge_max=3000):
             pileup_inds.append(p)
 
     return pileup_inds
+
+def better_calibrate_pulses(data, kmeans, optimums, tau=15000, return_inds=False, svw=51,
+                            samp_size=500, max_energy=3000, use_calib=calib_consts_new, save_file=None,
+                            shifting=True, old=False, ignore_clusters=[]):
+    # Optimums should be a nested list containing the optimum shaping parameters and energy shifts
+    # for each of the n clusters within kmeans where each element: [[peak, gap], shift]
+
+    mod_data, mod_inds = [], []
+    for p in tqdm(range(len(data)), desc='Modifying data for kmeans identification', leave=False):
+        try:
+            start = determine_rise(savgol_filter(data[p][:2200], 51, 0))
+            sig = reset_zero(data[p][start:start+1100], samp_size=50)
+            mod_data.append(sig/max(sig))
+            mod_inds.append(p)
+        except:
+            print('Index {} failed for some reason?'.format(p))
+            pass
+    mod_inds = np.array(mod_inds)
+    mod_data = np.array(mod_data)
+
+    mod_clusters = kmeans.predict(mod_data)
+
+    end_inds, pileup_inds, ignored_inds = [], [], []
+    energies = []
+    for mp, pulse_ind in enumerate(tqdm(mod_inds, desc='Creating better spectra', leave=False)):
+        cl = mod_clusters[mp]
+        if cl in ignore_clusters:
+            ignored_inds.append(pulse_ind)
+            continue
+        # Checking for pileup
+        if old:
+            peak, gap = 500, 2500
+        else:
+            peak, gap = optimums[cl][0][0], optimums[cl][0][1]
+
+        if possible_pileup(data[pulse_ind], peak, gap, tau, binary=True):
+            pileup_inds.append(pulse_ind)
+            continue
+
+        trap = trapezoid_filter(data[pulse_ind], peak, gap, tau, samp_size=samp_size)
+
+        if shifting:
+            energy = calibrate_energy(np.max(trap), *use_calib) + optimums[cl][1]
+        else:
+            energy = calibrate_energy(np.max(trap), *use_calib)
+
+        if energy <= max_energy:
+            energies.append(energy)
+            if return_inds:
+                end_inds.append(pulse_ind)
+
+    energies = np.array(energies)
+
+    if save_file is not None:
+        try:
+            os.mkdir('Data/Better_Spectra/')
+        except:
+            pass
+        print('Saving better energies')
+        np.save('Data/Better_Spectra/'+save_file+'.npy', energies)
+        if return_inds:
+            np.save('Data/Better_Spectra/'+save_file+'-indexes.npy', end_inds)
+
+    if return_inds:
+        end_inds = np.array(end_inds)
+        pileup_inds = np.array(pileup_inds)
+        ignored_inds = np.array(ignored_inds)
+        return energies, end_inds, pileup_inds, ignored_inds
+    return energies
