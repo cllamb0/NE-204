@@ -24,6 +24,14 @@ from kneed import KneeLocator
 import matplotlib.animation as animation
 from matplotlib.animation import FFMpegWriter
 
+from matplotlib.colors import Normalize
+import matplotlib.cm as cm
+
+try:
+    import becquerel as bq
+except:
+    print('Becquerel not imported.\nNot necessary at all for functions in this file.')
+
 plt.rcParams['figure.dpi'] = 300
 
 source_colors = {'Co57': 'red', 'Co60': 'orange', 'Cs137': 'gold',
@@ -479,3 +487,62 @@ def better_calibrate_pulses(data, kmeans, optimums, tau=15000, return_inds=False
         ignored_inds = np.array(ignored_inds)
         return energies, end_inds, pileup_inds, ignored_inds
     return energies
+
+def combine_data_files(input_dir, input_file_hint, output_directory):
+    """
+        input_file_hint: some text that shows up in all the files to combine
+    """
+    uncombined_data = [input_dir+f for f in os.listdir(input_dir) if f != '.DS_Store' and input_file_hint in f]
+
+    file_name = '-'.join(uncombined_data[0].split('/')[-1].split('_')[0].split('-')[:-1])
+
+    datas = []
+    for i, file in enumerate(uncombined_data):
+        f = h5py.File(file, 'r')
+        data_np = np.array(f['raw_data'])
+        time_event, unique_times = np.unique(np.array(f['event_data']['timestamp']), return_index=True)
+
+        data_np_crop = data_np[unique_times]
+
+        datas.append(data_np_crop)
+    merge_data = np.concatenate(datas)
+
+    fmerged = h5py.File('{}/{}-{}.h5'.format(output_directory, file_name, i+1), 'w')
+    fmerged.create_dataset('raw_data', data=merge_data)
+
+    fmerged.close()
+
+    print('Combined {} files of data'.format(i+1))
+
+
+def optimize_trapezoid_parameters(data, emin, emax, svw=31):
+    # Optimizes peaking and gap time for a set of pulses given an energy range of interest
+    # Used given purely photopeak events within a spectra
+    rise_times = []
+    for pp in tqdm(range(len(data)), desc='Determining rise times in data', leave=False):
+        signal = savgol_filter(data[pp], svw, 0)
+        rise_times.append(CFD(signal, 0.9, samp_size=50)-CFD(signal, 0.1, samp_size=50))
+    rise_times = np.array(rise_times)
+
+    peak_range = range(200, 610, 10)
+    gap_range = range(500, 2510, 10)
+
+    bins_ = np.linspace(emin, emax, (emax-emin)+1)
+    means, stds = [], []
+    parameters = []
+    for p in tqdm(peak_range, leave=False):
+        means_p, stds_p = [], []
+        for g in tqdm(gap_range, leave=False):
+            energies_temp = calibrate_pulses(data, p, g, 15000)
+            counts, b, _ = plt.hist(energies_temp, bins=bins_)
+            plt.close()
+            gf = gauss_fit(bins_[:-1], counts)
+
+            means_p.append(gf[2])
+            stds_p.append(gf[3])
+            parameters.append([p, g])
+        means.append(means_p)
+        stds.append(stds_p)
+    means = np.array(means)
+    stds = np.array(stds)
+    return means, stds, parameters
