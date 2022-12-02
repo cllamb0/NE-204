@@ -7,7 +7,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import h5py
-from scipy.signal import savgol_filter
+from scipy.signal import savgol_filter, find_peaks
 from scipy.optimize import curve_fit
 from tqdm.notebook import tqdm
 import math
@@ -24,7 +24,7 @@ from kneed import KneeLocator
 import matplotlib.animation as animation
 from matplotlib.animation import FFMpegWriter
 
-from matplotlib.colors import Normalize
+from matplotlib.colors import Normalize, LogNorm
 import matplotlib.cm as cm
 
 try:
@@ -83,10 +83,10 @@ def determine_rise(signal, sigma=8, window=20, offset=100):
 
     return int(rise_start-offset)
 
-def delay_signal(signal, delay=2000, sample_size=500, seed=69):
+def delay_signal(signal, delay=2000, samp_size=500, seed=69):
     # Adds an artifcial delay on pulse to act like 3316 delay functionality
     np.random.seed(seed)
-    noise_samp = signal[:sample_size]
+    noise_samp = signal[:samp_size]
     mean, std = np.mean(noise_samp), np.std(noise_samp)
     noise = np.random.normal(mean, 0.9*std, delay)
     return np.hstack([noise, signal])
@@ -359,12 +359,12 @@ def cluster_data(data, n_clust, buff=50, quality=True):
 
 def MWD(pulse, M, tau, samp_size=500):
     # Width of window M must be greater than the rise time of the pulse
-    signal = delay_signal(reset_zero(pulse, samp_size=samp_size), M)
+    signal = delay_signal(reset_zero(pulse, samp_size=samp_size), M, samp_size=samp_size)
     sum_sig = np.cumsum(signal)
     return signal[M:]-signal[:-M]+(1/tau)*(sum_sig[M:]-sum_sig[:-M])
 
 def MA(pulse, L, samp_size=500):
-    signal = delay_signal(reset_zero(pulse, samp_size=samp_size), L)
+    signal = delay_signal(reset_zero(pulse, samp_size=samp_size), L, samp_size=samp_size)
     sum_sig = np.cumsum(signal)
     return (1/L)*(sum_sig[L:]-sum_sig[:-L])
 
@@ -515,17 +515,19 @@ def combine_data_files(input_dir, input_file_hint, output_directory):
     print('Combined {} files of data'.format(i+1))
 
 
-def optimize_trapezoid_parameters(data, emin, emax, svw=31):
+def optimize_trapezoid_parameters(data, emin, emax,
+                                    pmin=200, pmax=600, pstep=10,
+                                    gmin=500, gmax=2500, gstep=10, svw=31):
     # Optimizes peaking and gap time for a set of pulses given an energy range of interest
     # Used given purely photopeak events within a spectra
-    rise_times = []
-    for pp in tqdm(range(len(data)), desc='Determining rise times in data', leave=False):
-        signal = savgol_filter(data[pp], svw, 0)
-        rise_times.append(CFD(signal, 0.9, samp_size=50)-CFD(signal, 0.1, samp_size=50))
-    rise_times = np.array(rise_times)
+    # rise_times = []
+    # for pp in tqdm(range(len(data)), desc='Determining rise times in data', leave=False):
+    #     signal = savgol_filter(data[pp], svw, 0)
+    #     rise_times.append(CFD(signal, 0.9, samp_size=50)-CFD(signal, 0.1, samp_size=50))
+    # rise_times = np.array(rise_times)
 
-    peak_range = range(200, 610, 10)
-    gap_range = range(500, 2510, 10)
+    peak_range = range(pmin, pmax+pstep, pstep)
+    gap_range = range(gmin, gmax+gstep, gstep)
 
     bins_ = np.linspace(emin, emax, (emax-emin)+1)
     means, stds = [], []
@@ -546,3 +548,34 @@ def optimize_trapezoid_parameters(data, emin, emax, svw=31):
     means = np.array(means)
     stds = np.array(stds)
     return means, stds, parameters
+
+"""
+    Functions and Variables created during Lab 3
+"""
+
+def simp_signal(signal, MAs=27, samp_size=50):
+    return(MA(signal, MAs, samp_size=samp_size))
+
+def bad_signal_detector(signal, thresh=20, bad_size=75, samp_size=50, MAs=51, fudge_max=150):
+    # The fudge_max value of 150 only works for CLLBC pulses, other detectors might need different values (especially HPGe)
+    MA_signal = MA(signal, MAs, samp_size=samp_size)
+    if (np.max(MA_signal) <= bad_size) or (np.argmax(signal) > fudge_max):
+        return True
+    peaks = find_peaks(MA_signal, prominence=thresh)[0]
+
+    if len(peaks) > 1:
+        return True
+    return False
+
+def gauss_new(x, A, x0, sigma):
+    # Gaussian signal shape
+    return A * np.exp(-(x - x0) ** 2 / (2 * sigma ** 2))
+
+def PSD(pulse, threshold, start, stop, samp_size=50):
+    # returns tail integral and total integral given start, stop and a threshold for the tail
+    pulse_r = reset_zero(pulse, samp_size=samp_size)[start:stop]
+
+    total = np.sum(pulse_r)
+    tail = np.sum(pulse_r[threshold:])
+
+    return tail, total
